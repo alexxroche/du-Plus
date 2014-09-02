@@ -1,0 +1,305 @@
+#!/bin/bash
+
+# my du -sh: hunt the disk hogs
+# ln -s ~/files/github/du-Plus/du+ ~/bin/du+
+VERSION=20140828161401
+
+#############
+# Variables #
+#############
+
+red=$'\e[1;31m'
+grn=$'\e[1;32m'
+yel=$'\e[1;33m'
+blu=$'\e[1;34m'
+mag=$'\e[1;35m'
+cyn=$'\e[1;36m'
+end=$'\e[0m'
+ne='2>/dev/null'
+#oddDirFirstChar=(" " "#" "~" "_" ":" "/" "." "(" "[" "\" "#" "%" "é" "²" "¤" "ù" "§") # these are dirs that we will miss
+addDIR=("/.{a..z}*" "/.{0..9}*" "/.{A..Z}*" "/*")
+#MegThreshold='\d'
+MegThreshold='^\d{3}M'
+GigThreshold='^\d{1,}(.\d)G'
+TeraThreshold='^\d{1,}(.\d)T'
+THRESHOLD="$MegThreshold|$GigThreshold|$TeraThreshold"
+#THRESHOLD="K|$MegThreshold|$GigThreshold|$TeraThreshold"
+CWD=''
+RECURSIVE=
+#RECURSIVE=1
+VERBOSE=0
+R='' # Relative or explicit path
+#T='	' # tab
+T='  ' # tab
+INDENT=1 # 0=none; 1=tab; 2=tree
+INC_DATE=0 # should we display the mdate for each file?
+ 
+#############
+# Functions #
+#############
+
+function help {
+    echo " Usage: ${grn}$( basename $0)${end} [-h|-test|/any/path/|../or/relative/path] [-r] [-nc]
+    -r recursive
+    -nc no colour in the output
+    -h this message
+    -i0 indent off              # Not implemented yet
+    -it indent tab              # also 'to-do'
+    -if indent fancy (like tree)
+    -t{string} Treshold string e.g. -t\\\\d\\{3\\}K\\|M 
+Copyright 2010-2014 Alexx Roche; MIT Licence"
+    exit
+}
+
+function test {
+# test that du+ works
+
+    if [ ! $(which du+ 2>/dev/null 1>/dev/null && echo 1 || echo 0) ]; then
+        echo Where is du+ ? Who am I anyway? $0 should be called du+
+        exit
+    fi
+
+    mkdir -p ./.du+_test_dir/A
+    mkdir -p ./.du+_test_dir/B
+    mkdir -p ./.du+_test_dir/C/D/E/F/G/H
+    mkdir -p ./.du+_test_dir/C/D/1/2/3
+    mkdir -p ./.du+_test_dir/C/D/4/5/6
+    touch ./.du+_test_dir/C/D/foo
+    touch ./.du+_test_dir/C/D/4/5/bar
+    mkdir -p ./.du+_test_dir/J/K/L/M/.N/O
+    mkdir -p ./.du+_test_dir/miss_a_few
+    mkdir -p ./.du+_test_dir/99/100
+    mkdir -p ./.du+_test_dir/99/foo.baz/fiz\ buz/this\ and\ that
+    mkdir -p "./.du+_test_dir/r / s / t "
+    mkdir -p './.du+_test_dir/u / v / w '
+    # dirs with space as the first char *WHO DOES THAT?* as if spaces in the middle weren't eveil enough
+    mkdir -p ./.du+_test_dir/X\ /\ Y\ /\ Z
+    mkdir -p ./.du+_test_dir/ZZZ/LAST/END/FINISH/fi
+
+    du+ ./.du+_test_dir -r -t.
+    if [ $1 ]; then exit; fi
+    rm -r ./.du+_test_dir
+    
+}
+
+function last_gasp {
+    #echo going to kill $$ and its children 
+    #ps --ppid $$|grep -v '^  PID'|awk '{print $1 " " $NF}'
+    #ps auwxf|grep $$
+    #PIDS2KILL=$(ps --pid $$ --ppid $$|grep -v '^  PID'|awk '{print $1}')
+    for i in `ps --pid $$ --ppid $$|grep -v '^  PID'|awk '{print $1}'`; do 
+        kill $i 2>/dev/null
+        #echo -n "$i, "
+    done
+    # racecondition detected
+    #why not just:
+    # kill -9 $(ps --pid $$ --ppid $$|grep -v '^  PID'|awk '{print $1}')
+    PIDS2KILL=$(ps u -C du|grep $(whoami)|awk '{print $2}')
+    # we /might/ be killing du that we are using for something else. Keep track of YOUR children; 'snot my problem - do I look like a nanny?
+    for i in $PIDS2KILL; do kill $i 2>/dev/null; done
+    ps auwxf|grep -v grep|grep 'du '
+    # killall du # SHOTGUN - but works
+    kill -9 $$ 
+    echo 'Dead men tell no tails'
+}
+
+# this calls the last_gasp function if du+ is killed (so that it can clean up after itself)
+trap last_gasp SIGHUP SIGINT SIGTERM
+
+function take_stock {
+    # Have to quote $1 or: /usr/local/bin/du+: line 52: [: too many arguments
+    if [ "$1" ] && [ "$R" != "$1" ];then 
+        if [ "$(( $VEROSE + 1 ))" -gt 10 ]; then # if [ $VERBOSE -gt || -eq 0 ]; then
+        # there is -ge but not in my version of bash
+        #if [ $VEROSE -ge 10 ]; then # if [ $VERBOSE -gt || -eq 0 ]; then
+            echo WE ARRIVE IN $1;
+        fi
+        CWD="$1"; 
+    elif [ "$(( $VEROSE + 1 ))" -gt 10 ]; then
+       echo first time arround in $CWD
+    fi
+    #indent="$2	"
+    #local indent="|── "
+    #if [ "$2" ];then indent="|	 $2"; fi
+    #local indent="│── "
+    local indent="├─ "
+    #if [ "$2" ];then indent="│        $2"; fi
+    if [ "$2" ];then indent="${2//├─ /│ }        ├─ "; fi
+    local DIRS=()
+    #DIRS=$( du -sh $CWD/.-* $CWD/.{a..z}* $CWD/.{0..9}* $CWD/.{A..Z}* $CWD/* 2>/dev/null |grep -P "$THRESHOLD")
+    # add the child dirs with a bash "push" - looks like we need to escape $dir
+    while read -r dir; do
+      if [ "$(( $VEROSE + 1 ))" -ge 007 ]; then
+        echo "DOING THIS DIR: $dir"; 
+      fi
+        DIRS=("${DIRS[@]}" "$dir")
+      #  printf '	%s\n' "${mag}$indent ADDING > ${dir#*\/}"
+ #       printf "Adding Dir: %s as the %4d of \$DIRS()\n\t\"%s\"\n" "$dir" ${#DIRS[*]} "${DIRS[*]}"; 
+    done < <(du -sh "$CWD"/.-* "$CWD"/.{a..z}* "$CWD"/.{0..9}* "$CWD"/.{A..Z}* "$CWD"/* 2>/dev/null |grep -P "$THRESHOLD")
+    #done < <(du -sh $CWD/.-* $CWD/.{a..z}* $CWD/.{0..9}* $CWD/.{A..Z}* $CWD/* 2>/dev/null |grep -P "$THRESHOLD") # but what about EVIL spaced in dir names?
+    # nope, just nope (to the next line - just because you can does NOT mean that you should)
+    #done < <(du -sh $CWD/.-* $CWD/.{a..z}* $CWD/.{0..9}* $CWD/.{A..Z}* $CWD/* 2>/dev/null |grep -P "$THRESHOLD"|sed -e 's/^$CWD/\"$CWD/' -e 's/\$/"/') 
+
+        if [ ${#DIRS[*]} -lt 0 ]; then
+            echo "We seem to have come up dry in $CWD/.-* $CWD/.{a..z}* $CWD/.{0..9}* $CWD/.{A..Z}* $CWD/*";
+        fi
+    
+        if [ $VERBOSE -gt 10 ]; then
+            echo WE DOING ${#DIRS[*]} REC
+            echo ${DIRS[*]}
+        fi
+        # we look in each one
+        for d in ${!DIRS[*]};do
+            #echo ${DIRS[$d]};
+            #printf "%4d: /%s\n" $d "${DIRS[$d]#*\/}"
+
+            #################################
+            # Begin Formatting into a tree #
+            ################################
+            # NTS there is a small bug where we have some extra | where they
+            # are not needed or some missing
+
+            local dent=$indent
+            if [ "$4" ] && [ "$(( $3 + 1 ))" -eq "$4" ];then
+            # Last child dir 
+                    #dent=${dent/├/└}; 
+                    dent=$(echo "$dent"|rev); 
+                    dent=${dent/\│/ }; 
+                    #dent=${dent/ ─├/ }; 
+                    dent=$(echo "$dent"|rev);
+                    dent=${dent/ ─├/--└}; 
+                    #dent=${dent/├─ /└--}; 
+                    #dent=${dent/└/├}; 
+            fi
+            if [ "$d" ] && [ "$(( $d + 1 ))" -eq "${#DIRS[*]}" ];then
+            # Last file in dir
+                indent=$dent
+                dent=${dent/├─ /└--}; 
+                dent=$(echo "$dent"|rev);
+                if [ ! "$3" ] && [ "$(( $d + 1 ))" -eq "${#DIRS[*]}" ];then # last dir
+                    indent=${indent/\│/ };
+                fi
+                #if  [ "$3" ] && [ "$(( $3 + 1 ))" -eq "$4" ]; then # "${#DIRS[*]}" ];then # last dir
+                 #   dent=${dent/\│/ }; 
+                #    dent=${dent/\│/ }; 
+                #fi
+                #dent=${dent/ ─├/--└}; 
+                dent=$(echo "$dent"|rev);
+            elif [ ! "$1" ] && [ $d -eq 0 ];then
+            # everything else
+                indent=$dent
+                dent=${dent/├/╤} # ¡ └ ┌ ╦ ╒ ╤ 
+                #dent=${dent/│/╤} # ¡ └ ┌ ╦ ╒ ╤ 
+
+            fi
+            if [ $VERBOSE -gt 0 ]; then
+                :
+            fi
+            # DEBUG: what does the child know? When did it know it?
+            if [ "$(( $VEROSE + 1 ))" -gt 10 ]; then
+                dent="$dent ($3:$4)($d:${#DIRS[*]})"
+            fi
+
+            ###############################
+            # END/ Formatting into a tree #
+            ###############################
+
+            if [ "$R" ];then
+                td=${DIRS[$d]#*\/} # does not work with relative paths
+            else
+                td=` echo "${DIRS[$d]}" | sed 's/^[^\s]*\s//'`
+            fi
+            #ts=${DIRS[$d]%?\/*}
+            #ts=$( echo ${DIRS[$d]} | sed 's/\s.*//' )
+            ts=` echo ${DIRS[$d]} | sed 's/\s.*//'`
+            if [ ${#ts} -lt 4 ]; then ts=" $ts"; fi
+            #if [ -d "$(dirname "$(readlink -e "${R}$td")")" ] && [ "$(dirname "$(readlink -e "${R}$td")")" ] && [ "$ts" ];then
+            if [ -d "$(readlink -e "${R}$td")" ] && [ "$ts" ];then
+                #echo "$(dirname "$(readlink -e "${R}$td")")"
+                #echo "Going off to find the $ts	 lump in /$td"
+                echo "$dent${red}$ts${end} ${blu}$R$td${end}"
+                if [ $RECURSIVE ] && [ "$( echo "$td"|grep -q '.' && echo 1)" ];then
+                    #echo "$dent   RECURSING into ${R}$td"
+                    # should this be$ take_stock ("${R}$td" "$indent" "$d" "${#DIRS[@]}") ? to help with paths that have spaces and . ?
+                    take_stock "${R}$td" "$indent" "$d" "${#DIRS[@]}"
+                #else # we seem to be matching erronious carridge returns
+                #    echo "NOT recursing $R$td\n"
+                fi
+            else
+                #echo "${R}$td is NOT a dir?\n"
+                # We should set the size colour to indicate, well size
+               #printf ' \e[1;31m%-6s\e[m	\e[1;34m%-6s\e[m\n' "$ts" "/$td"
+               printf '%s%s %s\n' "$dent" "${red}$ts${end}" "${grn}$R$td${end}"
+            fi
+        done
+}
+
+#############
+# main code #
+#############
+
+if [ "$1" ] && [ -d "$1" ] && [ "$R" != "$1" ];then 
+    #echo "You started off with: $1"
+    CWD=$(dirname "$1/.")
+#elif [ "$( echo "$1"|grep -qP '\-h' && echo 1)" ];then
+elif [[ $1 =~ ^[-]{1,}test*$ ]];then
+    test $2
+    exit
+elif [[ $1 =~ ^[-]{1,}h*$ ]];then
+    help
+    exit
+fi 
+if [ $2 ] && [ "$( echo "$2$3"|grep -iP '\-r' && echo 1)" ];then
+    RECURSIVE=1
+fi 
+if [ $2 ] && [ "$( echo "$2$3"|grep -iP '\-nc' && echo 1)" ];then
+    red=
+    grn=
+    yel=
+    blu=
+    mag=
+    cyn=
+    end=
+fi 
+if [ $2 ] && [ "$( echo "$2$3$4"|grep -iP '\-nt' && echo 1)" ];then
+    NO_tree=1
+fi 
+if [ $2 ] && [ "$( echo "$2$3$4"|grep -iP '\-v' && echo 1)" ];then
+    VERBOSE=$(( $VERBOSE + 1 ))
+fi 
+if [ $2 ] && [ "$( echo "$2$3$4"|grep -iP '\-t' && echo 1)" ];then
+    #user_th=$( echo "$2$3$4" | sed 's/.*-t//')
+    user_th="$2$3$4"
+    #echo "TH: $THRESHOLD";
+    THRESHOLD="$THRESHOLD|${user_th#*-t}"
+    #echo "setting TH: $THRESHOLD";
+fi 
+
+if [ $VERBOSE -gt 1 ]; then echo -n " Hunting for bloat with:
+du -sh "; for t in ${!addDIR[*]};do echo -n "$CWD${addDIR[$t]} "; done
+ echo -n " | grep -P \"$THRESHOLD\" "; 
+    if [ $RECURSIVE ];then echo " RECURSIVELY!"; else echo ""; fi
+fi
+#if [ "$( echo "$1"|grep '^\.' && echo 1)" ]; then R=''; #echo "GOING RELATIVE"; 
+if [[ $1 =~ ^/.*$ ]]; then 
+    R='/'; if [ $VERBOSE -gt 1 ]; then echo "GOING RELATIVE"; fi 
+fi
+
+take_stock
+
+########
+# BUGS #
+########
+#
+# Currently known:
+#   * Does not handle dirs that have a space as their first char (not properly escaped or quoted?)
+#   * du+ -test|grep C # shows that we have some stray | (not inheriting properly?)
+#   * args should work in any order
+# Feel free to fix them and push them to me on github
+
+# We could add datetime for each file and/or dir
+# We could accept multiple paths
+
+#######
+# eof #
+#######
